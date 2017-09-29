@@ -1,5 +1,7 @@
 <?php
 
+define( 'WP_CLI_EXPORT_COMMAND_NO_SPLIT', '-1' );
+
 /**
  * Export WordPress content to a WXR file.
  *
@@ -22,6 +24,10 @@ class Export_Command extends WP_CLI_Command {
 	*/
 	public $export_args = array();
 
+	private $stdout;
+	private $max_file_size;
+	private $wxr_path;
+
 	/**
 	 * Export WordPress content to a WXR file.
 	 *
@@ -35,11 +41,14 @@ class Export_Command extends WP_CLI_Command {
 	 * : Full path to directory where WXR export files should be stored. Defaults
 	 * to current working directory.
 	 *
+	 * [--stdout]
+	 * : Output the whole XML using standard output (incompatible with --dir=)
+	 *
 	 * [--skip_comments]
 	 * : Don't include comments in the WXR export file.
 	 *
 	 * [--max_file_size=<MB>]
-	 * : A single export file should have this many megabytes.
+	 * : A single export file should have this many megabytes. -1 for unlimited.
 	 * ---
 	 * default: 15
 	 * ---
@@ -68,6 +77,9 @@ class Export_Command extends WP_CLI_Command {
 	 *
 	 * [--start_id=<pid>]
 	 * : Export only posts with IDs greater than or equal to this post ID.
+	 *
+	 * [--max_num_posts=<num>]
+	 * : Export no more than <num> posts (excluding attachments).
 	 *
 	 * [--author=<author>]
 	 * : Export only posts by this author. Can be either user login or user ID.
@@ -104,10 +116,12 @@ class Export_Command extends WP_CLI_Command {
 	public function __invoke( $_, $assoc_args ) {
 		$defaults = array(
 			'dir'               => NULL,
+			'stdout'            => FALSE,
 			'start_date'        => NULL,
 			'end_date'          => NULL,
 			'post_type'         => NULL,
 			'post_type__not_in' => NULL,
+			'max_num_posts'     => NULL,
 			'author'            => NULL,
 			'category'          => NULL,
 			'post_status'       => NULL,
@@ -118,14 +132,22 @@ class Export_Command extends WP_CLI_Command {
 			'filename_format'   => '{site}.wordpress.{date}.{n}.xml',
 		);
 
+
+		if (! empty( $assoc_args['stdout'] ) && ( ! empty( $assoc_args['dir'] ) || ! empty( $assoc_args['filename_format'] ) ) ) {
+			WP_CLI::error( '--stdout and --dir cannot be used together.' );
+		}
+
 		$assoc_args = wp_parse_args( $assoc_args, $defaults );
+
 		$this->validate_args( $assoc_args );
 
 		if ( !function_exists( 'wp_export' ) ) {
 			self::load_export_api();
 		}
 
-		WP_CLI::log( 'Starting export process...' );
+		if ( ! $this->stdout ) {
+			WP_CLI::log( 'Starting export process...' );
+		}
 
 		add_action( 'wp_export_new_file', function( $file_path ) {
 			WP_CLI::log( sprintf( "Writing to file %s", $file_path ) );
@@ -133,20 +155,30 @@ class Export_Command extends WP_CLI_Command {
 		} );
 
 		try {
-			wp_export( array(
-				'filters' => $this->export_args,
-				'writer' => 'WP_Export_Split_Files_Writer',
-				'writer_args' => array(
-					'max_file_size' => $this->max_file_size * MB_IN_BYTES,
-					'destination_directory' => $this->wxr_path,
-					'filename_template' => self::get_filename_template( $assoc_args['filename_format'] ),
-				)
-			) );
+			if ( $this->stdout ) {
+				wp_export( array(
+					'filters' => $this->export_args,
+					'writer' => 'WP_Export_Stdout_Writer',
+					'writer_args' => NULL
+				) );
+			} else {
+				wp_export( array(
+					'filters' => $this->export_args,
+					'writer' => 'WP_Export_Split_Files_Writer',
+					'writer_args' => array(
+						'max_file_size' => $this->max_file_size,
+						'destination_directory' => $this->wxr_path,
+						'filename_template' => self::get_filename_template( $assoc_args['filename_format'] ),
+					)
+				) );
+			}
 		} catch ( Exception $e ) {
 			WP_CLI::error( $e->getMessage() );
 		}
 
-		WP_CLI::success( 'All done with export.' );
+		if ( ! $this->stdout ) {
+			WP_CLI::success( 'All done with export.' );
+		}
 	}
 
 	private static function get_filename_template( $filename_format ) {
@@ -158,19 +190,6 @@ class Export_Command extends WP_CLI_Command {
 	}
 
 	private static function load_export_api() {
-		if ( !defined( 'KB_IN_BYTES' ) ) {
-			// Constants for expressing human-readable data sizes
-			// in their respective number of bytes.
-			define( 'KB_IN_BYTES', 1024 );
-			define( 'MB_IN_BYTES', 1024 * KB_IN_BYTES );
-			define( 'GB_IN_BYTES', 1024 * MB_IN_BYTES );
-			define( 'TB_IN_BYTES', 1024 * GB_IN_BYTES );
-			define( 'PB_IN_BYTES', 1024 * TB_IN_BYTES );
-			define( 'EB_IN_BYTES', 1024 * PB_IN_BYTES );
-			define( 'ZB_IN_BYTES', 1024 * EB_IN_BYTES );
-			define( 'YB_IN_BYTES', 1024 * ZB_IN_BYTES );
-		}
-
 		require dirname( dirname( __FILE__ ) ) . '/functions.php';
 	}
 
@@ -183,6 +202,11 @@ class Export_Command extends WP_CLI_Command {
 				if ( false === $result )
 					$has_errors = true;
 			}
+		}
+
+		if ( $args['stdout'] ) {
+			$this->wxr_path = NULL;
+			$this->stdout = TRUE;
 		}
 
 		if ( $has_errors ) {
@@ -330,6 +354,17 @@ class Export_Command extends WP_CLI_Command {
 		}
 
 		$this->export_args['author'] = $hit;
+		return true;
+	}
+
+	private function check_max_num_posts( $num ) {
+		if ( ! is_null( $num ) && ( ! is_numeric( $num ) || $num <= 0) ) {
+			WP_CLI::warning( sprintf( "max_num_posts should be a positive integer.", $num ) );
+			return false;
+		}
+
+		$this->export_args['max_num_posts'] = (int)$num;
+
 		return true;
 	}
 

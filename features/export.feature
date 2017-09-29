@@ -423,6 +423,24 @@ Feature: Export content.
       0
       """
 
+  Scenario: Export posts using --max_num_posts
+    Given a WP install
+
+    When I run `wp post generate --post_type=post --count=10`
+    And I run `wp export --post_type=post --max_num_posts=1 --stdout | grep -cF '<wp:post_type>post</wp:post_type>'`
+    Then STDOUT should be:
+      """
+      1
+      """
+
+    When I run `wp post generate --post_type=post --count=10`
+    And I run `wp post generate --post_type=attachment --count=10`
+    And I run `wp export --max_num_posts=1 --stdout | grep -cP '\<wp:post_type\>(attachment|post)\</wp:post_type\>'`
+    Then STDOUT should be:
+      """
+      1
+      """
+
   Scenario: Export a site with a custom filename format
     Given a WP install
 
@@ -478,4 +496,104 @@ Feature: Export content.
     Then STDOUT should contain:
       """
       0
+      """
+
+  Scenario: Export splitting the dump
+    Given a WP install
+
+    When I run `wp export --max_file_size=0.0001`
+    Then STDOUT should contain:
+      """
+      001.xml
+      """
+	And STDERR should be empty
+
+  Scenario: Export without splitting the dump
+    Given a WP install
+	# Make export file > 15MB so will split by default.
+    And I run `wp db query "UPDATE wp_posts SET post_content = REPEAT( 'A', 16 * 1024 * 1024 ) WHERE ID = 1;"`
+
+    When I run `wp export`
+    Then STDOUT should contain:
+      """
+      000.xml
+      """
+    And STDOUT should contain:
+      """
+      001.xml
+      """
+	And STDERR should be empty
+
+    When I run `wp export --max_file_size=0`
+    Then STDOUT should contain:
+      """
+      000.xml
+      """
+    And STDOUT should contain:
+      """
+      001.xml
+      """
+	And STDERR should be empty
+
+    When I run `wp export --max_file_size=-1`
+    Then STDOUT should contain:
+      """
+      000.xml
+      """
+    And STDOUT should not contain:
+      """
+      001.xml
+      """
+	And STDERR should be empty
+
+  Scenario: Export a site to stdout
+    Given a WP install
+    And I run `wp comment generate --post_id=1 --count=1`
+    And I run `wp plugin install wordpress-importer --activate`
+
+    When I run `wp export --stdout > export.xml`
+    Then STDOUT should be empty
+    And the return code should be 0
+
+    When I run `cat export.xml`
+    Then STDOUT should not contain:
+      """
+      Writing to file
+      """
+    And STDOUT should contain:
+      """
+      <generator>
+      """
+
+    When I run `wp site empty --yes`
+    Then STDOUT should contain:
+      """
+      Success:
+      """
+
+    When I run `wp comment list --format=count`
+    Then STDOUT should be:
+      """
+      0
+      """
+
+    When I run `wp import export.xml --authors=skip`
+    Then STDOUT should contain:
+      """
+      Success:
+      """
+
+    When I run `wp comment list --format=count`
+    Then STDOUT should be:
+      """
+      2
+      """
+
+  Scenario: Error when --stdout and --dir are both provided
+    Given a WP install
+
+    When I try `wp export --stdout --dir=foo`
+    Then STDERR should be:
+      """
+      Error: --stdout and --dir cannot be used together.
       """
